@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Chat</title>
+    <meta
+      name="description"
+      content="A simple AI chat interface built with Node.js, Express, HTML, CSS, and JavaScript."
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar" aria-label="Chat toolbar">
+        <div class="brand" aria-label="AI assistant brand">
+          <span class="brand-badge">AI</span>
+          <span class="brand-text">Assistant</span>
+        </div>
+
+        <button id="new-chat" class="secondary-button" type="button">
+          New Chat
+        </button>
+      </header>
+
+      <main class="chat-area" aria-label="AI chat conversation area">
+        <section id="welcome-screen" class="welcome-screen" aria-live="polite">
+          <div class="welcome-card">
+            <p class="eyebrow">Welcome</p>
+            <h1>Ask me anything</h1>
+            <p class="welcome-copy">
+              Start a new conversation and I will help you brainstorm, write, ask
+              questions, or summarize ideas.
+            </p>
+
+            <div class="sample-prompts" aria-label="Example prompts">
+              <button class="prompt-button" type="button">Summarize this idea</button>
+              <button class="prompt-button" type="button">Plan a study schedule</button>
+              <button class="prompt-button" type="button">Help me write an email</button>
+            </div>
+          </div>
+        </section>
+
+        <div id="messages" class="messages" aria-live="polite" aria-label="Chat messages"></div>
+
+        <div
+          id="typing-indicator"
+          class="typing-indicator hidden"
+          role="status"
+          aria-live="polite"
+          aria-label="AI is typing"
+        >
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+      </main>
+
+      <div id="error-banner" class="error-banner hidden" role="alert" aria-live="assertive"></div>
+
+      <form id="chat-form" class="composer" novalidate>
+        <label for="message-input" class="sr-only">Type your message</label>
+        <textarea
+          id="message-input"
+          name="message"
+          rows="1"
+          placeholder="Type your message..."
+          aria-label="Chat message input"
+        ></textarea>
+
+        <button id="send-button" class="primary-button" type="submit">
+          Send
+        </button>
+      </form>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
