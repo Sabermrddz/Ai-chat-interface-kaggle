@@ -1,11 +1,12 @@
 {
   "name": "ai-chat-app",
   "version": "1.0.0",
-  "description": "Responsive AI chat app with Node.js and Express",
+  "description": "AI chat UI connected to a self-hosted Kaggle notebook model",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node --test test/app.test.js"
   },
   "engines": {
     "node": ">=18"
