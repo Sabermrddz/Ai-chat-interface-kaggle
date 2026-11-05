@@ -27,10 +27,14 @@ function startServer(port, extraEnv) {
     cwd: ROOT,
     env: {
       ...process.env,
+      NODE_ENV: 'test',
       PORT: String(port),
+      HOST: '127.0.0.1',
       BRIDGE_TOKEN: TEST_SECRET,
+      ACCESS_PASSWORD: '',
       ALLOWED_ORIGIN: '',
       MODEL_API_URL: '',
+      MODEL_NAME: '',
       STATUS_PING_TIMEOUT_MS: '150',
       UPSTREAM_CONNECT_TIMEOUT_MS: '500',
       UPSTREAM_IDLE_TIMEOUT_MS: '500',
@@ -133,7 +137,8 @@ test('GET /api/status is offline without a registered bridge', async () => {
   assert.deepEqual(await response.json(), {
     online: false,
     model: null,
-    lastSeen: null
+    lastSeen: null,
+    source: null
   });
 });
 
@@ -198,6 +203,7 @@ test('status uses heartbeat metadata and fails the live ping', async () => {
   const status = await response.json();
   assert.equal(status.online, false);
   assert.equal(status.model, 'test-model');
+  assert.equal(status.source, 'heartbeat');
   assert.equal(typeof status.lastSeen, 'string');
   assert.ok(!Number.isNaN(Date.parse(status.lastSeen)));
 });

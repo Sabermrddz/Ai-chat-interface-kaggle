@@ -30,9 +30,16 @@ const {
 } = require('./lib/bridge');
 const { chatHandler } = require('./lib/chat-proxy');
 const { createRateLimiter } = require('./lib/rate-limit');
+const {
+  loginHandler,
+  logoutHandler,
+  requireAuth,
+  statusHandler
+} = require('./lib/auth');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 const BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || '256kb';
 const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGIN || '')
   .split(',')
@@ -143,6 +150,11 @@ const registerLimiter = createRateLimiter({
   max: 30,
   message: 'Too many bridge registrations. Please wait a moment.'
 });
+const loginLimiter = createRateLimiter({
+  windowMs: 60_000,
+  max: 5,
+  message: 'Too many login attempts. Please wait a minute and try again.'
+});
 
 app.use('/api', apiLimiter);
 
@@ -150,7 +162,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-app.get('/api/status', async (req, res) => {
+app.get('/api/auth/status', statusHandler);
+app.post('/api/auth/login', loginLimiter, loginHandler);
+app.post('/api/auth/logout', logoutHandler);
+
+app.get('/api/status', requireAuth, async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
 
   try {
@@ -214,7 +230,7 @@ app.post('/api/bridge/manual', (req, res) => {
   }
 });
 
-app.post('/api/chat', chatLimiter, (req, res, next) => {
+app.post('/api/chat', requireAuth, chatLimiter, (req, res, next) => {
   Promise.resolve(chatHandler(req, res)).catch(next);
 });
 
@@ -225,7 +241,11 @@ app.use('/api', (req, res) => {
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  if (path.extname(req.path)) {
+    return res.status(404).type('text/plain').send('Not found');
+  }
+
+  return res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.use((error, req, res, next) => {
@@ -248,8 +268,9 @@ app.use((error, req, res, next) => {
 
 initBridgeFromEnv();
 
-const server = app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+const server = app.listen(PORT, HOST, () => {
+  const displayHost = HOST === '0.0.0.0' ? 'localhost' : HOST;
+  console.log(`Server is running on http://${displayHost}:${PORT}`);
 
   if (!process.env.BRIDGE_TOKEN) {
     console.warn('BRIDGE_TOKEN is not set. Notebook heartbeats will be rejected.');

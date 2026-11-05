@@ -28,7 +28,8 @@ notebook re-registers whenever the quick tunnel URL changes.
 
 ## Features
 
-- Status badge in the header: green "Kaggle connected + model" or red "Offline"
+- Status badge with heartbeat/manual/env labels and a two-poll offline threshold
+- Optional `ACCESS_PASSWORD` login with signed HttpOnly session cookies
 - Streaming tokens into the AI bubble, with a Stop button (AbortController)
 - Settings panel for system prompt, temperature, and max tokens (localStorage)
 - Conversation history in localStorage with a sidebar (rename, delete, New Chat)
@@ -41,17 +42,28 @@ notebook re-registers whenever the quick tunnel URL changes.
 ## Project structure
 
 ```text
-server.js               Express app, routes, middleware, startup/shutdown
-lib/bridge.js           Bridge registration, heartbeat state, status ping
-lib/chat-proxy.js       Validation and SSE proxy to the Kaggle model server
-lib/rate-limit.js       Small in-memory rate limiter
-kaggle/notebook.py      Kaggle notebook cells (copy into a Kaggle notebook)
-public/index.html       Chat UI
-public/styles.css       UI styles and themes
-public/app.js           Chat behavior, streaming, markdown, storage
-test/app.test.js        API status and chat error-path tests
-.env.example            Environment variable template
-Procfile                Process command for Render/Railway/Heroku
+server.js                    Express app, routes, middleware, startup/shutdown
+lib/auth.js                  Optional password login, HMAC session cookies
+lib/bridge.js                Bridge registration, heartbeat state, status ping
+lib/chat-proxy.js            Validation and SSE proxy to the Kaggle model server
+lib/rate-limit.js            Small in-memory rate limiter
+kaggle/notebook.py           Kaggle notebook source (source of truth)
+kaggle/notebook.ipynb        Generated Kaggle notebook (upload this file)
+scripts/build-notebook.js    Generates notebook.ipynb from notebook.py
+public/index.html            Chat UI
+public/styles.css            UI styles and themes
+public/ui-helpers.js         Status/auth presentation helpers
+public/app.js                Chat behavior, streaming, markdown, storage
+test/app.test.js             API status and chat error-path tests
+test/auth.test.js            Password auth, cookies, and login rate limiting
+test/config.test.js          HOST, docs, and detach-finalize wiring
+test/proxy.test.js           Mock upstream, streaming, timeouts, and aborts
+test/security.test.js        CORS, body limits, static 404s, registration
+test/status.test.js          Env/manual status sources
+test/frontend.test.js        Status labels, failure threshold, stop notes
+test/notebook.test.js        Notebook generation and freshness checks
+.env.example                 Environment variable template
+Procfile                     Process command for Render/Railway/Heroku
 ```
 
 ## Requirements
@@ -100,12 +112,35 @@ JavaScript and a small built-in safe markdown renderer.
    deployed site or a public URL for `SITE_URL`.
 
 `BRIDGE_TOKEN` is required. If it is missing, heartbeat registrations are
-rejected and the UI stays offline.
+rejected and the UI stays offline. The default `HOST=0.0.0.0` accepts network
+connections; set `HOST=127.0.0.1` for a local-only server.
+
+## Configuration reference
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BRIDGE_TOKEN` | none | Shared secret for notebook heartbeats; required for registration |
+| `PORT` | `3000` | HTTP port |
+| `HOST` | `0.0.0.0` | Bind address; use `127.0.0.1` for local-only access |
+| `ALLOWED_ORIGIN` | same host | Comma-separated browser origins allowed to call the API |
+| `ACCESS_PASSWORD` | none | Enables the password login for `/api/status` and `/api/chat` |
+| `NODE_ENV` | none | Set to `production` so session cookies are marked `Secure` |
+| `REQUEST_BODY_LIMIT` | `256kb` | Maximum JSON request body size |
+| `BRIDGE_EXTRA_HOSTS` | none | Extra heartbeat hostnames beyond `*.trycloudflare.com` |
+| `MODEL_API_URL` | none | Manual fallback model base URL (no `/v1` path) |
+| `MODEL_NAME` | auto | Fallback model name for manual/env mode |
+| `MODEL_API_KEY` | `BRIDGE_TOKEN` | Bearer token for the manual/env model server |
+| `ADMIN_TOKEN` | `BRIDGE_TOKEN` | Token for `POST /api/bridge/manual` |
+| `TRUST_PROXY` | none | Set to `1` behind a reverse proxy so rate limits see client IPs |
+
+Timeout overrides are listed in `.env.example`.
 
 ## Run the model on Kaggle
 
-1. Create a new Kaggle notebook and copy the cells from `kaggle/notebook.py` into
-   it (or upload the file and open it as a notebook).
+1. Open `kaggle/notebook.ipynb` in Kaggle with **File > Import Notebook** (or
+   upload it directly). If you change `kaggle/notebook.py`, regenerate it with
+   `npm run build:notebook` before uploading. The `.py` file is the source of
+   truth; do not upload it as the notebook.
 
 2. In the notebook settings:
    - Enable **Internet**.
@@ -170,6 +205,10 @@ shard path to the server.
 - `/api/status` reports `online: true` only when both conditions hold:
   1. the last heartbeat was within 90 seconds, and
   2. a live `GET {tunnelUrl}/v1/models` ping succeeds.
+- The status response includes `source`: `heartbeat`, `manual`, `env`, or `null`.
+  The UI says **Kaggle connected** only for heartbeat mode, **Model connected**
+  for manual/env mode, and waits for two consecutive failed polls before showing
+  **Offline**.
 - The tunnel URL changes every session. The next heartbeat replaces the old URL,
   so you normally do not need to edit anything.
 - In-memory state is lost when the website restarts. The notebook's next
@@ -193,7 +232,8 @@ MODEL_API_KEY=optional-model-bearer-token
 `MODEL_API_URL` must be the base URL (no `/v1` path). HTTPS is required except
 for `localhost`. `MODEL_API_KEY` defaults to `BRIDGE_TOKEN` if unset. In manual
 mode, online status depends on the live `/v1/models` ping, not the 90-second
-heartbeat window.
+heartbeat window, and `/api/status` reports `source: "env"`. The admin endpoint
+below reports `source: "manual"`.
 
 ### Admin endpoint
 
@@ -227,6 +267,7 @@ below.
    - `BRIDGE_TOKEN` = your long random secret (same as the Kaggle secret)
    - `ALLOWED_ORIGIN` = `https://your-app.onrender.com`
    - `TRUST_PROXY` = `1`
+   - `ACCESS_PASSWORD` = optional long password for the login screen
 5. Deploy, then set `SITE_URL` in the Kaggle notebook to the Render URL.
 
 Render's free instance sleeps after inactivity. In-memory bridge state is lost
@@ -258,11 +299,19 @@ Do not use `git push heroku main`; this repository's branch is `master`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Basic health check |
-| `GET` | `/api/status` | `{ online, model, lastSeen }` |
+| `GET` | `/health` | Basic health check (always public) |
+| `GET` | `/api/auth/status` | `{ required, authenticated }` for the login UI |
+| `POST` | `/api/auth/login` | Password login; rate limited to 5 attempts/minute/IP |
+| `POST` | `/api/auth/logout` | Clears the session cookie |
+| `GET` | `/api/status` | `{ online, model, lastSeen, source }` |
 | `POST` | `/api/chat` | Validate and proxy a chat request; streams SSE |
 | `POST` | `/api/bridge/register` | Notebook heartbeat; requires `BRIDGE_TOKEN` |
 | `POST` | `/api/bridge/manual` | Admin-only manual tunnel setup |
+
+When `ACCESS_PASSWORD` is set, `/api/status`, `/api/chat`, and the chat UI require
+a signed session cookie from `/api/auth/login`. Bridge registration still uses
+`BRIDGE_TOKEN`. The session cookie is `HttpOnly`, `SameSite=Strict`, valid for
+seven days, and marked `Secure` in production or over HTTPS.
 
 `POST /api/chat` accepts:
 
@@ -280,20 +329,27 @@ Do not use `git push heroku main`; this repository's branch is `master`.
 
 The legacy `{ "message": "Hello" }` shape is still accepted. The server caps
 message count, per-message length, total conversation length, and output tokens.
+Set `stream` to a boolean; the string `"false"` is also accepted for compatibility,
+and other non-boolean values return HTTP 400. If no model name can be resolved,
+the upstream request omits the `model` field instead of sending `"default"`.
 
 ## Security notes
 
 - Keep `.env` out of git; it is already in `.gitignore`.
 - Use a long random `BRIDGE_TOKEN` and the same value for the Kaggle secret.
   Rotate both if the value is ever exposed.
+- Set a long random `ACCESS_PASSWORD` for a public deployment. Login is rate
+  limited, and the HMAC-signed session cookie cannot be read by JavaScript.
 - The quick tunnel URL is public, but the model server requires the bearer token.
   The browser never receives the token.
 - The Express server logs only method, path, status, and duration. It does not log
-  request bodies, headers, or tokens.
+  request bodies, headers, tokens, or passwords.
 - CORS is restricted to `ALLOWED_ORIGIN` in production. Set it to the exact
   origin, without a trailing slash.
 - Rate limits, a 256 KB JSON body limit, input validation, CSP, and basic security
   headers are enabled by default.
+- Keep `HOST=127.0.0.1` when you do not want the server reachable outside the
+  local machine.
 - Bridge state is in memory only. There is no database and no persistence of
   secrets.
 
@@ -354,6 +410,18 @@ minute per client IP. Wait for the `Retry-After` period.
 Set `ALLOWED_ORIGIN` to the exact browser origin, including `https://` and
 without a trailing slash. Restart the site after changing it.
 
+### The badge says "Model connected" instead of "Kaggle connected"
+
+That is expected for `MODEL_API_URL` (env) or `POST /api/bridge/manual` (manual)
+mode. **Kaggle connected** is used only for notebook heartbeats.
+
+### The login screen keeps appearing or APIs return 401
+
+Check that `ACCESS_PASSWORD` is set consistently for the server and that cookies
+are enabled in the browser. Behind HTTPS, set `NODE_ENV=production` (or trust the
+proxy) so the session cookie is marked `Secure`. If you changed the password,
+existing cookies become invalid and you need to sign in again.
+
 ### The model download fails
 
 - Gated models require accepting the license on Hugging Face and an `HF_TOKEN`
@@ -377,6 +445,8 @@ heartbeat will update the tunnel URL automatically.
 npm test
 ```
 
-The tests use Node's built-in test runner and spawn the server on local ports.
-They cover `/api/status`, registration validation, manual auth, chat validation,
-and the offline chat error path. No real tunnel or model is required.
+The tests use Node's built-in test runner and spawn the server on local ports. A
+mock OpenAI-compatible upstream covers streaming, non-streaming, timeouts, client
+aborts, and upstream error mapping. The suite also covers auth cookies and login
+rate limiting, CORS, body limits, static 404s, status sources, and notebook
+generation freshness. No real tunnel, GPU, or model is required.

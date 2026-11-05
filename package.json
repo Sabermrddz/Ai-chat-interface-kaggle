@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test test/app.test.js"
+    "build:notebook": "node scripts/build-notebook.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=18"

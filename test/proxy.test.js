@@ -1,0 +1,190 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const { setTimeout: wait } = require('node:timers/promises');
+const { after, before, test } = require('node:test');
+
+const {
+  configureManualBridge,
+  postJson,
+  startServer,
+  stopServer
+} = require('./helpers/app-server');
+const { startMockUpstream } = require('./helpers/mock-upstream');
+
+let server;
+let mock;
+
+function chatRequest(body = {}, headers = {}) {
+  return postJson(
+    server,
+    '/api/chat',
+    {
+      messages: [{ role: 'user', content: 'Hello' }],
+      ...body
+    },
+    headers
+  );
+}
+
+function chatCompletionRequest() {
+  return mock.requests
+    .filter((request) => request.url === '/v1/chat/completions')
+    .at(-1);
+}
+
+before(async () => {
+  mock = await startMockUpstream();
+  server = await startServer();
+
+  const registration = await configureManualBridge(server, {
+    url: mock.url,
+    model: 'mock-model'
+  });
+  assert.equal(registration.status, 200);
+});
+
+after(async () => {
+  await Promise.all([stopServer(server), mock.close()]);
+});
+
+test('non-streaming chat returns the upstream reply', async () => {
+  const response = await chatRequest({ stream: false });
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /application\/json/);
+  assert.deepEqual(await response.json(), {
+    reply: 'Hello from mock',
+    model: 'mock-model'
+  });
+
+  const upstreamRequest = chatCompletionRequest();
+  assert.equal(upstreamRequest.body.stream, false);
+  assert.equal(upstreamRequest.body.model, 'mock-model');
+});
+
+test('unknown model names are omitted from the upstream request', async () => {
+  mock.state.model = '';
+  mock.state.modelsBody = { object: 'list', data: [] };
+
+  const registration = await configureManualBridge(server, {
+    url: mock.url,
+    model: ''
+  });
+  assert.equal(registration.status, 200);
+
+  const response = await chatRequest({ stream: false });
+  assert.equal(response.status, 200);
+
+  const upstreamRequest = chatCompletionRequest();
+  assert.equal(Object.hasOwn(upstreamRequest.body, 'model'), false);
+});
+
+test('the string "false" disables streaming', async () => {
+  mock.state.model = 'mock-model';
+  mock.state.modelsBody = null;
+
+  const registration = await configureManualBridge(server, {
+    url: mock.url,
+    model: 'mock-model'
+  });
+  assert.equal(registration.status, 200);
+
+  const response = await chatRequest({ stream: 'false' });
+  assert.equal(response.status, 200);
+  assert.equal(chatCompletionRequest().body.stream, false);
+  assert.match((await response.json()).reply, /Hello from mock/);
+});
+
+test('other non-boolean stream values are rejected', async () => {
+  const response = await chatRequest({ stream: 'true' });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /stream must be a boolean/i);
+});
+
+test('streaming chat forwards SSE data and the done marker', async () => {
+  const response = await chatRequest({ stream: true });
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/event-stream/);
+
+  const text = await response.text();
+  assert.match(text, /Hello/);
+  assert.match(text, /from mock/);
+  assert.match(text, /\[DONE\]/);
+  assert.equal(chatCompletionRequest().body.stream, true);
+});
+
+test('upstream status codes map to friendly errors', async () => {
+  mock.state.chatBody = { error: 'upstream failure' };
+
+  mock.state.chatStatus = 401;
+  let response = await chatRequest({ stream: false });
+  assert.equal(response.status, 502);
+  assert.match((await response.json()).error, /rejected the request/i);
+
+  mock.state.chatStatus = 404;
+  response = await chatRequest({ stream: false });
+  assert.equal(response.status, 502);
+  assert.match((await response.json()).error, /no chat endpoint/i);
+
+  mock.state.chatStatus = 429;
+  response = await chatRequest({ stream: false });
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /busy/i);
+
+  mock.state.chatStatus = 200;
+  mock.state.chatBody = null;
+});
+
+test('an idle upstream stream is aborted with a friendly error', async () => {
+  mock.state.chatHandler = (req, res) => {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.flushHeaders?.();
+    res.write('data: {"choices":[{"delta":{"content":"Start"}}]}\n\n');
+  };
+
+  const response = await chatRequest({ stream: true });
+  assert.equal(response.status, 200);
+
+  const text = await response.text();
+  assert.match(text, /Start/);
+  assert.match(text, /stopped responding/i);
+
+  mock.state.chatHandler = null;
+});
+
+test('a client abort does not crash the proxy', async () => {
+  mock.state.sseEvents = Array.from({ length: 20 }, (_, index) => ({
+    choices: [{ delta: { content: `chunk-${index}` } }]
+  }));
+  mock.state.sseDelayMs = 40;
+
+  const controller = new AbortController();
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'Hello' }],
+      stream: true
+    }),
+    signal: controller.signal
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  await reader.read();
+  controller.abort();
+
+  await wait(250);
+
+  const health = await fetch(`http://127.0.0.1:${server.port}/health`);
+  assert.equal(health.status, 200);
+
+  mock.state.sseDelayMs = 0;
+  mock.state.sseEvents = [
+    { choices: [{ delta: { content: 'Hello' } }] },
+    { choices: [{ delta: { content: ' from mock' } }] }
+  ];
+});

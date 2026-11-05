@@ -91,6 +91,14 @@
             <button id="settings-button" class="secondary-button" type="button">
               Settings
             </button>
+            <button
+              id="auth-logout"
+              class="secondary-button hidden"
+              type="button"
+              title="Sign out"
+            >
+              Sign out
+            </button>
           </div>
         </header>
 
@@ -179,6 +187,39 @@
     </div>
 
     <dialog
+      id="auth-dialog"
+      class="auth-dialog"
+      aria-labelledby="auth-title"
+      aria-describedby="auth-copy"
+    >
+      <form id="auth-form" class="auth-form">
+        <div class="dialog-header">
+          <h2 id="auth-title">Access required</h2>
+        </div>
+        <p id="auth-copy" class="auth-copy">
+          Enter the access password to use this chat.
+        </p>
+        <label class="field" for="auth-password">
+          <span class="field-label">Password</span>
+          <input
+            id="auth-password"
+            type="password"
+            name="password"
+            maxlength="512"
+            autocomplete="current-password"
+            required
+          />
+        </label>
+        <p id="auth-error" class="auth-error hidden" role="alert"></p>
+        <div class="dialog-actions">
+          <button id="auth-submit" class="primary-button" type="submit">
+            Unlock
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
       id="settings-dialog"
       class="settings-dialog"
       aria-labelledby="settings-title"
@@ -246,6 +287,7 @@
       </form>
     </dialog>
 
+    <script src="/ui-helpers.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

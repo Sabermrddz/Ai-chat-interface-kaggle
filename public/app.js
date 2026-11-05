@@ -48,6 +48,14 @@ const sidebarClose = document.getElementById('sidebar-close');
 const sidebarBackdrop = document.getElementById('sidebar-backdrop');
 const conversationList = document.getElementById('conversation-list');
 const emptyConversations = document.getElementById('empty-conversations');
+const authDialog = document.getElementById('auth-dialog');
+const authForm = document.getElementById('auth-form');
+const authPassword = document.getElementById('auth-password');
+const authError = document.getElementById('auth-error');
+const authSubmit = document.getElementById('auth-submit');
+const authLogout = document.getElementById('auth-logout');
+
+const ui = window.ChatUI;
 
 const state = {
   conversations: loadConversations(),
@@ -58,7 +66,11 @@ const state = {
   online: null,
   statusModel: null,
   statusLastSeen: null,
+  statusSource: null,
+  statusFailures: 0,
   statusInFlight: false,
+  authRequired: false,
+  authAuthenticated: true,
   waiting: false,
   abortController: null,
   stream: null
@@ -535,45 +547,199 @@ function clearError() {
   errorBanner.classList.add('hidden');
 }
 
+function updateAuthVisibility() {
+  const signedIn = state.authRequired && state.authAuthenticated;
+  authLogout.classList.toggle('hidden', !signedIn);
+}
+
+function showAuthDialog() {
+  updateAuthVisibility();
+
+  if (typeof authDialog.showModal === 'function') {
+    if (!authDialog.open) {
+      authDialog.showModal();
+    }
+  } else {
+    authDialog.setAttribute('open', '');
+  }
+
+  window.setTimeout(() => authPassword.focus(), 0);
+}
+
+function closeAuthDialog() {
+  if (typeof authDialog.close === 'function' && authDialog.open) {
+    authDialog.close();
+  } else {
+    authDialog.removeAttribute('open');
+  }
+}
+
+function showAuthError(message) {
+  authError.textContent = message;
+  authError.classList.remove('hidden');
+}
+
+async function checkAuthStatus() {
+  try {
+    const response = await fetch('/api/auth/status', {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store'
+    });
+
+    if (!response.ok) {
+      return;
+    }
+
+    const data = await response.json();
+    state.authRequired = Boolean(data.required);
+    state.authAuthenticated = !state.authRequired || Boolean(data.authenticated);
+    updateAuthVisibility();
+    updateComposerState();
+
+    if (state.authRequired && !state.authAuthenticated) {
+      showAuthDialog();
+    } else {
+      closeAuthDialog();
+    }
+  } catch {
+    updateAuthVisibility();
+  }
+}
+
+async function submitAuth(event) {
+  event.preventDefault();
+  authError.classList.add('hidden');
+  authSubmit.disabled = true;
+
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ password: authPassword.value })
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Could not unlock the chat.');
+    }
+
+    state.authRequired = Boolean(data.required);
+    state.authAuthenticated = !state.authRequired || Boolean(data.authenticated);
+    updateAuthVisibility();
+    closeAuthDialog();
+    authPassword.value = '';
+    clearError();
+    await refreshStatus();
+  } catch (error) {
+    showAuthError(error.message || 'Could not unlock the chat.');
+    authPassword.focus();
+  } finally {
+    authSubmit.disabled = false;
+  }
+}
+
+async function logout() {
+  authLogout.disabled = true;
+
+  try {
+    const response = await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { Accept: 'application/json' }
+    });
+
+    if (!response.ok) {
+      throw new Error('Could not sign out.');
+    }
+
+    state.authAuthenticated = false;
+    state.online = null;
+    state.statusFailures = 0;
+    state.statusModel = null;
+    state.statusLastSeen = null;
+    state.statusSource = null;
+    detachActiveStream();
+    updateStatusBadge();
+
+    if (state.authRequired) {
+      showAuthDialog();
+    } else {
+      closeAuthDialog();
+      updateAuthVisibility();
+    }
+  } catch (error) {
+    showError(error.message || 'Could not sign out.');
+  } finally {
+    authLogout.disabled = false;
+  }
+}
+
 function sizeTextArea() {
   messageInput.style.height = 'auto';
   messageInput.style.height = `${Math.min(messageInput.scrollHeight, 180)}px`;
 }
 
 function updateStatusBadge() {
-  const stateName = state.online === null ? 'checking' : state.online ? 'online' : 'offline';
-  statusBadge.dataset.state = stateName;
+  const presentation = ui.statusPresentation({
+    online: state.online,
+    model: state.statusModel,
+    lastSeen: state.statusLastSeen,
+    source: state.statusSource
+  });
 
-  if (state.online === null) {
-    statusText.textContent = 'Checking...';
-    statusBadge.title = 'Checking the Kaggle notebook';
-  } else if (state.online) {
-    statusText.textContent = state.statusModel
-      ? `Kaggle connected \u00b7 ${state.statusModel}`
-      : 'Kaggle connected';
-    statusBadge.title = state.statusLastSeen
-      ? `Last heartbeat: ${new Date(state.statusLastSeen).toLocaleString()}`
-      : 'Connected to the Kaggle notebook';
-  } else {
-    statusText.textContent = 'Offline';
-    statusBadge.title = 'Kaggle notebook is offline';
-  }
+  statusBadge.dataset.state = presentation.state;
+  statusText.textContent = presentation.text;
+  statusBadge.title = presentation.title;
 
   updateComposerState();
 }
 
 function updateComposerState() {
   const isOffline = state.online === false;
+  const needsAuth = state.authRequired && !state.authAuthenticated;
 
-  messageInput.disabled = isOffline;
-  sendButton.disabled = isOffline || state.waiting;
+  messageInput.disabled = isOffline || needsAuth;
+  sendButton.disabled = isOffline || needsAuth || state.waiting;
   stopButton.classList.toggle('hidden', !state.waiting);
   stopButton.disabled = !state.waiting;
-  messageInput.placeholder = isOffline
-    ? 'Kaggle notebook is offline - start it to chat.'
-    : 'Type your message...';
+  messageInput.placeholder = needsAuth
+    ? 'Enter the access password to chat.'
+    : isOffline
+      ? 'The model is offline - start it to chat.'
+      : 'Type your message...';
   offlineNotice.classList.toggle('hidden', !isOffline);
   messagesContainer.setAttribute('aria-busy', state.waiting ? 'true' : 'false');
+}
+
+function applyStatusResult(result) {
+  const next = ui.evaluateStatus(
+    {
+      online: state.online,
+      failures: state.statusFailures,
+      model: state.statusModel,
+      lastSeen: state.statusLastSeen,
+      source: state.statusSource
+    },
+    result
+  );
+
+  state.online = next.online;
+  state.statusFailures = next.failures;
+  state.statusModel = next.model;
+  state.statusLastSeen = next.lastSeen;
+  state.statusSource = next.source;
+}
+
+function markUnauthorized() {
+  state.authRequired = true;
+  state.authAuthenticated = false;
+  state.online = null;
+  state.statusFailures = 0;
+  state.statusModel = null;
+  state.statusLastSeen = null;
+  state.statusSource = null;
+  updateAuthVisibility();
+  showAuthDialog();
+  updateComposerState();
 }
 
 async function refreshStatus() {
@@ -589,18 +755,18 @@ async function refreshStatus() {
       cache: 'no-store'
     });
 
+    if (response.status === 401) {
+      markUnauthorized();
+      return;
+    }
+
     if (!response.ok) {
       throw new Error('Status request failed.');
     }
 
-    const data = await response.json();
-    state.online = Boolean(data.online);
-    state.statusModel = typeof data.model === 'string' ? data.model : null;
-    state.statusLastSeen = typeof data.lastSeen === 'string' ? data.lastSeen : null;
+    applyStatusResult({ ok: true, data: await response.json() });
   } catch {
-    state.online = false;
-    state.statusModel = null;
-    state.statusLastSeen = null;
+    applyStatusResult({ ok: false });
   } finally {
     state.statusInFlight = false;
     updateStatusBadge();
@@ -837,20 +1003,20 @@ function appendStreamText(streamState, delta) {
 }
 
 function finalizeStream(streamState, aborted, errorMessage) {
+  if (streamState.finalized) {
+    return;
+  }
+  streamState.finalized = true;
+
   if (streamState.raf) {
     window.cancelAnimationFrame(streamState.raf);
     streamState.raf = 0;
   }
 
+  streamState.text = ui.finalizeStreamText(streamState.text, aborted);
+
   if (streamState.bubble) {
     streamState.bubble.innerHTML = renderMarkdown(streamState.text);
-
-    if (aborted && streamState.text) {
-      const note = document.createElement('p');
-      note.className = 'stream-note';
-      note.textContent = 'Stopped.';
-      streamState.bubble.appendChild(note);
-    }
   }
 
   if (!streamState.text && !errorMessage) {
@@ -952,6 +1118,11 @@ async function sendMessage(rawText) {
       signal: controller.signal
     });
 
+    if (response.status === 401) {
+      markUnauthorized();
+      throw new Error('Enter the access password to continue.');
+    }
+
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       throw new Error(data.error || 'The AI service is currently unavailable.');
@@ -982,28 +1153,20 @@ async function sendMessage(rawText) {
 }
 
 function detachActiveStream() {
-  if (!state.abortController && !state.stream) {
-    return;
-  }
-
   const controller = state.abortController;
   const streamState = state.stream;
-
-  state.abortController = null;
-  state.stream = null;
-  state.waiting = false;
-
-  if (streamState?.raf) {
-    window.cancelAnimationFrame(streamState.raf);
-    streamState.raf = 0;
-  }
 
   if (controller) {
     controller.abort();
   }
 
-  setTypingIndicator(false);
-  updateComposerState();
+  if (streamState) {
+    finalizeStream(streamState, true, '');
+  } else {
+    state.waiting = false;
+    setTypingIndicator(false);
+    updateComposerState();
+  }
 }
 
 function startNewChat() {
@@ -1272,6 +1435,9 @@ settingsButton.addEventListener('click', openSettings);
 settingsClose.addEventListener('click', closeSettings);
 settingsForm.addEventListener('submit', saveSettingsFromForm);
 temperatureInput.addEventListener('input', updateTemperatureOutput);
+authForm.addEventListener('submit', submitAuth);
+authLogout.addEventListener('click', logout);
+authDialog.addEventListener('cancel', (event) => event.preventDefault());
 
 settingsReset.addEventListener('click', () => {
   systemPromptInput.value = DEFAULT_SETTINGS.systemPrompt;
@@ -1375,7 +1541,14 @@ window.addEventListener('online', refreshStatus);
 applyTheme(state.theme);
 renderSidebar();
 renderActiveConversation();
+updateAuthVisibility();
 updateStatusBadge();
 sizeTextArea();
-refreshStatus();
-window.setInterval(refreshStatus, STATUS_POLL_MS);
+
+async function initialize() {
+  await checkAuthStatus();
+  await refreshStatus();
+  window.setInterval(refreshStatus, STATUS_POLL_MS);
+}
+
+initialize();
