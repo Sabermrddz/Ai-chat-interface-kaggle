@@ -1,6 +1,6 @@
 # PROJECT OVERVIEW
 
-**Scope of this review:** every project file was read or regenerated except `node_modules/` and `package-lock.json`, as requested. The repository is branch `master` at base commit `78f51d7` (`update`), with the feature work in this working tree. This revision was updated on 2026-11-05 after implementing authentication, status-source labels, stream/model fixes, notebook generation, and the expanded test suite. No real secrets, tokens, or API keys are present; `.env.example` placeholders and test-only secrets are not production credentials.
+**Scope of this review:** every project file was read or regenerated except `node_modules/` and `package-lock.json`, as requested. The repository is branch `master`: base commit `78f51d7` (`update`), feature commit `7890ac1` (`Add auth, status sources, and notebook generation`), pushed to `origin`. This revision was updated on 2026-11-05 after implementing authentication, status-source labels, stream/model fixes, notebook generation, and the expanded 46-test suite. No real secrets, tokens, or API keys are present; `.env.example` placeholders and test-only secrets are not production credentials.
 
 ---
 
@@ -2614,7 +2614,7 @@ Caveats:
 ### Documentation and repository
 
 - `README.md` is updated for auth, notebook upload, HOST, status sources, environment variables, API shapes, and tests. Review it after any future API change.
-- `PROJECT_OVERVIEW.md` is the detailed reference; this revision refreshes the narrative and embedded source blocks. It is still untracked until committed.
+- `PROJECT_OVERVIEW.md` is the detailed reference; this revision refreshes the narrative and embedded source blocks. It is tracked in feature commit `7890ac1`.
 - `package-lock.json` was not reviewed; dependency reproducibility depends on it.
 - There is no LICENSE file, CONTRIBUTING guide, CI workflow, issue template, or deployment configuration beyond `Procfile`.
 - The declared Node engine is `>=18`, but tests were run on Node 24. Node 18 compatibility is likely but not verified in CI.
