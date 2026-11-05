@@ -29,6 +29,7 @@ function baseEnvironment(extraEnv) {
     BRIDGE_TOKEN: TEST_SECRET,
     ADMIN_TOKEN: '',
     ACCESS_PASSWORD: '',
+    SESSION_SECRET: '',
     ALLOWED_ORIGIN: '',
     MODEL_API_URL: '',
     MODEL_NAME: '',
@@ -39,6 +40,7 @@ function baseEnvironment(extraEnv) {
     STATUS_PING_TIMEOUT_MS: '150',
     UPSTREAM_CONNECT_TIMEOUT_MS: '500',
     UPSTREAM_IDLE_TIMEOUT_MS: '500',
+    SSE_KEEPALIVE_MS: '',
     ...extraEnv
   };
 }

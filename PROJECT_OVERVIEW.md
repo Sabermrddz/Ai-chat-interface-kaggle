@@ -1,6 +1,6 @@
 # PROJECT OVERVIEW
 
-**Scope of this review:** every project file was read or regenerated except `node_modules/` and `package-lock.json`, as requested. The repository is branch `master`: base commit `78f51d7` (`update`), feature commit `7890ac1` (`Add auth, status sources, and notebook generation`), pushed to `origin`. This revision was updated on 2026-11-05 after implementing authentication, status-source labels, stream/model fixes, notebook generation, and the expanded 46-test suite. No real secrets, tokens, or API keys are present; `.env.example` placeholders and test-only secrets are not production credentials.
+**Scope of this review:** every project file was read or regenerated except `node_modules/` and `package-lock.json`, as requested. The repository is branch `master`: base commit `78f51d7` (`update`), feature commit `7890ac1` (`Add auth, status sources, and notebook generation`), pushed to `origin`. This revision was updated on 2026-11-05 after implementing authentication, status-source labels, stream/model fixes, notebook generation, Heroku readiness (Node 22, startup flags, SSE keep-alive, single-dyno deployment docs), and the expanded 56-test suite. No real secrets, tokens, or API keys are present; `.env.example` placeholders and test-only secrets are not production credentials.
 
 ---
 
@@ -28,7 +28,7 @@ What the app does today:
 
 | Item | Value |
 | --- | --- |
-| Runtime declared in `package.json` | Node.js `>=18` (`engines.node`) |
+| Runtime declared in `package.json` | Node.js `22.x` (`engines.node`) |
 | Runtime used for the checks in this document | Node.js `v24.14.1`, npm `11.11.0` |
 | Backend framework | Express, declared as `^4.19.2`; this workspace resolves `express@4.22.3` |
 | Dependencies | `express` only |
@@ -55,7 +55,7 @@ What the app does today:
 web: node server.js
 ```
 
-`package-lock.json` exists and was intentionally not reviewed. No deployment manifests other than `Procfile` exist.
+`package-lock.json` exists and pins the root engine to `22.x`. `Procfile` is the only deployment manifest; the README documents Heroku deployment (single Eco dyno). The app has no writable-disk dependency: all server state is in memory.
 
 ---
 
@@ -93,6 +93,7 @@ kaggle-interface/
     ├── auth.test.js              Password login, cookies, auth-disabled/production, login rate limiting
     ├── config.test.js            HOST, README/env docs, detach-finalize wiring
     ├── frontend.test.js          Status labels, two-failure threshold, stop-note persistence
+    ├── heroku.test.js            Node engine, Heroku docs, startup flags, SESSION_SECRET/TRUST_PROXY
     ├── notebook.test.js          Cell parsing, nbformat output, generated-notebook freshness
     ├── proxy.test.js             Mock upstream, streaming, model omission, timeouts, abort, errors
     ├── security.test.js          CORS, body limit, malformed JSON, static 404, registration 503
@@ -141,7 +142,7 @@ kaggle-interface/
 
 - `GET /api/auth/status` is public and returns `{required, authenticated}` with `Cache-Control: no-store`. When `ACCESS_PASSWORD` is unset, it returns `{required:false,authenticated:true}`.
 - `POST /api/auth/login` accepts `{"password":"..."}`. Missing/empty password returns `400`; a wrong password or one longer than 512 characters returns `401 {"error":"Incorrect password."}`. The route is limited to 5 attempts/minute/IP in addition to the global API limit. A successful login returns `{ok:true,required:true,authenticated:true}` and sets the session cookie.
-- Session design: token format `v1.<expiry-ms>.<hmac-sha256-hex>`. The HMAC key is SHA-256-derived from `ACCESS_PASSWORD` with a context string. Tokens expire after 7 days. Verification is timing-safe and rejects malformed/expired tokens.
+- Session design: token format `v1.<expiry-ms>.<hmac-sha256-hex>`. The HMAC key comes from `SESSION_SECRET` when set; otherwise it is SHA-256-derived from `ACCESS_PASSWORD` + `BRIDGE_TOKEN` with a context string. Tokens expire after 7 days. Verification is timing-safe and rejects malformed/expired tokens. Rotating the effective key invalidates existing cookies.
 - Cookie: name `kaggle_chat_session`, `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age=604800`, and `Secure` when `NODE_ENV=production` or Express sees HTTPS (`req.secure`). No `cookie-parser` dependency; cookies are parsed manually.
 - `POST /api/auth/logout` clears the cookie with `Max-Age=0`. Logout is stateless: the old signed token remains cryptographically valid until expiration if an attacker already captured it; normal browsers drop it because the cookie is cleared.
 - When auth is enabled, unauthenticated `/api/status` and `/api/chat` return `401 {"error":"Authentication required."}` with `Cache-Control: no-store`.
@@ -214,6 +215,7 @@ kaggle-interface/
 - Body limit: `256kb` by default (`REQUEST_BODY_LIMIT` can change it).
 - Success with `stream:true` (default): `200` with `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-cache, no-transform`, `Connection: keep-alive`, `X-Accel-Buffering: no`.
   - Upstream SSE chunks are forwarded as-is.
+  - While the stream is open, an SSE comment (`: ping`) is written every `SSE_KEEPALIVE_MS` (default 15,000 ms) to keep Heroku/proxies from closing an idle connection while the model produces its first token.
   - If the upstream returns a non-SSE JSON response, the server converts it into one SSE event:
     - `data: {"choices":[{"delta":{"content":"<reply>"}}]}`
     - `data: [DONE]`
@@ -263,7 +265,8 @@ kaggle-interface/
 - Startup:
   - Calls `loadLocalEnv()` before loading backend modules, then `initBridgeFromEnv()`.
   - Listens on `PORT` (default 3000) and `HOST` (default `0.0.0.0`; use `127.0.0.1` for local-only).
-  - Logs a warning when `BRIDGE_TOKEN` is missing and when `ALLOWED_ORIGIN` is missing.
+  - Logs whether `BRIDGE_TOKEN`, `ALLOWED_ORIGIN`, and `ACCESS_PASSWORD` are set (booleans only; no secrets), and warns when `BRIDGE_TOKEN` or `ALLOWED_ORIGIN` is missing.
+  - In `NODE_ENV=production` with no `ACCESS_PASSWORD`, logs a warning that the chat interface and APIs are publicly accessible.
   - On `EADDRINUSE`, prints a message and exits with code 1.
   - Handles `SIGINT`/`SIGTERM` with a graceful `server.close()` and a forced exit after 5 seconds.
 
@@ -325,7 +328,7 @@ What is placeholder or external:
 
 ### Environment variables read by the backend
 
-See section 6 for the full table. All variables read by code are now documented in `.env.example` and README: `HOST`, `ACCESS_PASSWORD`, `REQUEST_BODY_LIMIT`, and `BRIDGE_EXTRA_HOSTS` are no longer undocumented. `MODEL_API_URL` is read inside `initBridgeFromEnv()`; it is normalized to an HTTPS base URL (HTTP allowed only for loopback), given `MODEL_NAME`, and given a token from `MODEL_API_KEY` or `BRIDGE_TOKEN`.
+See section 6 for the full table. Variables read by code are documented in `.env.example` and README: `HOST`, `ACCESS_PASSWORD`, `SESSION_SECRET`, `REQUEST_BODY_LIMIT`, `BRIDGE_EXTRA_HOSTS`, and `SSE_KEEPALIVE_MS`. `MODEL_API_URL` is read inside `initBridgeFromEnv()`; it is normalized to an HTTPS base URL (HTTP allowed only for loopback), given `MODEL_NAME`, and given a token from `MODEL_API_KEY` or `BRIDGE_TOKEN`.
 
 
 ### `server.js` (full source)
@@ -603,15 +606,28 @@ initBridgeFromEnv();
 
 const server = app.listen(PORT, HOST, () => {
   const displayHost = HOST === '0.0.0.0' ? 'localhost' : HOST;
-  console.log(`Server is running on http://${displayHost}:${PORT}`);
+  const bridgeTokenSet = Boolean(String(process.env.BRIDGE_TOKEN || '').trim());
+  const accessPasswordSet = Boolean(String(process.env.ACCESS_PASSWORD || '').trim());
+  const allowedOriginSet = ALLOWED_ORIGINS.length > 0;
 
-  if (!process.env.BRIDGE_TOKEN) {
+  console.log(`Server is running on http://${displayHost}:${PORT}`);
+  console.log(
+    `Startup config: BRIDGE_TOKEN=${bridgeTokenSet}, ALLOWED_ORIGIN=${allowedOriginSet}, ACCESS_PASSWORD=${accessPasswordSet}`
+  );
+
+  if (!bridgeTokenSet) {
     console.warn('BRIDGE_TOKEN is not set. Notebook heartbeats will be rejected.');
   }
 
-  if (ALLOWED_ORIGINS.length === 0) {
+  if (!allowedOriginSet) {
     console.warn(
       'ALLOWED_ORIGIN is not set. Only same-host browser origins are allowed. Set it in production.'
+    );
+  }
+
+  if (!accessPasswordSet && process.env.NODE_ENV === 'production') {
+    console.warn(
+      'ACCESS_PASSWORD is not set. The chat interface and APIs are publicly accessible in production.'
     );
   }
 });
@@ -2370,6 +2386,11 @@ ALLOWED_ORIGIN=http://localhost:3000
 # Leave empty to keep the site public. Use a long random value in production.
 # ACCESS_PASSWORD=replace-with-a-long-random-password
 
+# Optional independent key for signing session cookies. If unset, the key is
+# derived from ACCESS_PASSWORD + BRIDGE_TOKEN. Set this to keep sessions valid
+# when rotating one of those values.
+# SESSION_SECRET=replace-with-another-long-random-string
+
 # Set to production on HTTPS deployments so session cookies are marked Secure.
 # NODE_ENV=production
 
@@ -2398,6 +2419,10 @@ ALLOWED_ORIGIN=http://localhost:3000
 # STATUS_PING_TIMEOUT_MS=4000
 # UPSTREAM_CONNECT_TIMEOUT_MS=30000
 # UPSTREAM_IDLE_TIMEOUT_MS=120000
+
+# SSE keep-alive comment interval in milliseconds. Keeps Heroku/proxies from
+# closing an idle stream while the model loads its first token. Default 15000.
+# SSE_KEEPALIVE_MS=15000
 ```
 
 ### `.gitignore` (exact contents)
@@ -2416,7 +2441,8 @@ npm-debug.log*
 | `PORT` | no | `3000` | `server.js` | HTTP listen port. Invalid values fall back to 3000. |
 | `HOST` | no | `0.0.0.0` | `server.js` | Listen interface. Use `127.0.0.1` to restrict to localhost; container platforms usually need `0.0.0.0`. |
 | `NODE_ENV` | no | unset/development | `lib/auth.js` | When exactly `production`, session cookies are marked `Secure`. Use only on HTTPS deployments. |
-| `ACCESS_PASSWORD` | no | empty | `lib/auth.js` | Enables password protection for `/api/status` and `/api/chat` when non-empty after trimming. No minimum length enforced; login rejects passwords over 512 characters. |
+| `ACCESS_PASSWORD` | no | empty | `lib/auth.js`, `server.js` | Enables password protection for `/api/status` and `/api/chat` when non-empty after trimming. No minimum length enforced; login rejects passwords over 512 characters. A production startup warning is logged when unset. |
+| `SESSION_SECRET` | no | derived | `lib/auth.js` | Optional independent HMAC key for session cookies. If empty, the key is SHA-256-derived from `ACCESS_PASSWORD` + `BRIDGE_TOKEN`. |
 | `ALLOWED_ORIGIN` | no | empty | `server.js` | Comma-separated browser origins. Trailing slashes are trimmed. If empty, same-host origins are allowed. It does not protect APIs by itself. |
 | `BRIDGE_TOKEN` | effectively required for heartbeat | empty | `lib/bridge.js`, notebook | Shared secret for heartbeat registration, fallback admin secret, and fallback upstream bearer token. Heartbeat registration returns 503 when unset. |
 | `ADMIN_TOKEN` | no | empty | `lib/bridge.js` | Separate secret for `POST /api/bridge/manual`; falls back to `BRIDGE_TOKEN`. |
@@ -2425,6 +2451,7 @@ npm-debug.log*
 | `MODEL_API_KEY` | no | empty | `lib/bridge.js` | Bearer token for the fixed/manual model endpoint; falls back to `BRIDGE_TOKEN`. Not stored in browser code. |
 | `BRIDGE_EXTRA_HOSTS` | no | empty | `lib/bridge.js` | Comma-separated hostnames accepted for heartbeat registration in addition to `*.trycloudflare.com`. No schemes or wildcards. |
 | `REQUEST_BODY_LIMIT` | no | `256kb` | `server.js` | Express JSON body size string (`256kb`, `1mb`, etc.). |
+| `SSE_KEEPALIVE_MS` | no | `15000` | `lib/chat-proxy.js` | Interval for SSE `: ping` comments while a stream is open; clamped to 100-300000 ms. |
 | `STATUS_PING_TIMEOUT_MS` | no | `4000` | `lib/bridge.js` | Timeout for the `/v1/models` status check; clamped to 100–30000 ms. |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | no | `30000` | `lib/chat-proxy.js` | Time to establish the upstream chat request; clamped to 1000–120000 ms. |
 | `UPSTREAM_IDLE_TIMEOUT_MS` | no | `120000` | `lib/chat-proxy.js` | Maximum idle time while waiting for upstream stream data/non-stream response; clamped to 1000–600000 ms. |
@@ -2453,7 +2480,7 @@ There are no other environment variables read by `server.js` or `lib/*.js`; a se
   - Treats all other blocks as Python code cells, trims blank lines, and skips empty blocks.
   - Emits nbformat 4.5 JSON with `metadata.language_info` for Python and empty outputs/execution counts.
   - Writes `kaggle/notebook.ipynb`; the generated file is intended to be uploaded to Kaggle.
-- The generated notebook currently has **18 cells: 10 markdown and 8 code**. `test/notebook.test.js` verifies this structure and checks that the committed notebook matches a fresh generation.
+- The generated notebook currently has **18 cells: 10 markdown and 8 code**. Its first markdown cell explains enabling Internet/GPU, adding `KAGGLE_BRIDGE_TOKEN` and optional `HF_TOKEN`, and setting `SITE_URL` to the Heroku app URL. `test/notebook.test.js` verifies this structure and checks that the committed notebook matches a fresh generation.
 - The notebook does not contain secrets or outputs. Kaggle Secrets are read at runtime by the notebook, not embedded in the `.ipynb`.
 
 ---
@@ -2468,7 +2495,7 @@ npm test
 
 The exact script is `node --test test/*.test.js`. On this Windows/Node setup, `node --test test` fails with `Cannot find module ...\test`; use the npm script or the glob form shown above.
 
-**Latest run in this review:** `npm test` produced **46 tests, 46 passed, 0 failed** in about 6.7 seconds. `node --check` also passed for `server.js`, `lib/auth.js`, `lib/bridge.js`, `lib/chat-proxy.js`, `public/app.js`, `public/ui-helpers.js`, `scripts/build-notebook.js`, the test helpers, and `test/config.test.js`.
+**Latest run in this review:** `npm test` produced **56 tests, 56 passed, 0 failed** in about 6.2 seconds. `node --check` also passed for `server.js`, `lib/auth.js`, `lib/bridge.js`, `lib/chat-proxy.js`, `public/app.js`, `public/ui-helpers.js`, `scripts/build-notebook.js`, the test helpers, and `test/config.test.js`.
 
 Test files and coverage:
 
@@ -2478,8 +2505,9 @@ Test files and coverage:
 | `test/auth.test.js` | 7 | Public auth status, protected status/chat 401, login wrong/correct with cookie attributes, logout clearing cookie, auth-disabled mode, production `Secure` cookie, login rate limiting. |
 | `test/config.test.js` | 4 | `HOST` binding/default, `.env.example` documentation, README notebook/local-binding documentation, detach-finalize wiring. |
 | `test/frontend.test.js` | 7 | Heartbeat vs manual/env labels, unknown source, checking/offline distinction, two-failure threshold, persisted stop note, auth prompt logic. |
+| `test/heroku.test.js` | 8 | Node 22 engine/Procfile, Heroku README/H12 docs, new env docs, startup boolean log, production warning, `SESSION_SECRET` isolation, fallback key derivation, `TRUST_PROXY` IP/Secure cookie behavior. |
 | `test/notebook.test.js` | 3 | Cell parsing, generated nbformat structure/intro, committed notebook freshness. |
-| `test/proxy.test.js` | 8 | Mock upstream non-stream success, model omission, `"false"` streaming, invalid stream rejection, SSE forwarding with `[DONE]`, status-code mapping, idle timeout, client abort. |
+| `test/proxy.test.js` | 10 | Mock upstream non-stream success, model omission (including literal `default`), `"false"` streaming, invalid stream rejection, SSE forwarding with `[DONE]`, SSE keep-alive, status-code mapping, idle timeout, client abort. |
 | `test/security.test.js` | 5 | Static extension 404 vs SPA fallback, CORS allow/deny, oversized body, malformed JSON, registration disabled without `BRIDGE_TOKEN`. |
 | `test/status.test.js` | 2 | `MODEL_API_URL` env source and manual source through `/api/status`. |
 
@@ -2499,7 +2527,7 @@ What happens in a fresh local environment:
 
 ```powershell
 npm install        # installs express only (package-lock already present)
-npm test           # 46 tests pass; no external services required
+npm test           # 56 tests pass; no external services required
 npm start          # starts http://localhost:3000 by default on HOST=0.0.0.0
 npm run build:notebook  # regenerates kaggle/notebook.ipynb from notebook.py
 ```
@@ -2596,8 +2624,12 @@ Caveats:
 - Missing static files with extensions return 404 while SPA routes still serve `index.html`.
 - `HOST` is configurable and documented.
 - Optional `ACCESS_PASSWORD` authentication and logout are implemented.
-- `HOST`, `ACCESS_PASSWORD`, `REQUEST_BODY_LIMIT`, and `BRIDGE_EXTRA_HOSTS` are documented in `.env.example` and README.
-- README now points to `notebook.ipynb` for upload and documents local-only `HOST`.
+- `SESSION_SECRET` signing is supported, with fallback derivation from `ACCESS_PASSWORD` + `BRIDGE_TOKEN`.
+- `TRUST_PROXY=1` is documented and tested for forwarded client IPs and HTTPS `Secure` cookies.
+- SSE keep-alive comments are sent every 15 seconds while a stream waits for output.
+- Startup logs flag presence (never values) for `BRIDGE_TOKEN`, `ALLOWED_ORIGIN`, and `ACCESS_PASSWORD`; production warns when no password is set.
+- `HOST`, `ACCESS_PASSWORD`, `SESSION_SECRET`, `REQUEST_BODY_LIMIT`, `BRIDGE_EXTRA_HOSTS`, and `SSE_KEEPALIVE_MS` are documented in `.env.example` and README.
+- README now points to `notebook.ipynb` for upload, documents local-only `HOST`, and includes a single-Eco-dyno Heroku deployment section.
 
 ### Security
 
@@ -2616,8 +2648,8 @@ Caveats:
 - `README.md` is updated for auth, notebook upload, HOST, status sources, environment variables, API shapes, and tests. Review it after any future API change.
 - `PROJECT_OVERVIEW.md` is the detailed reference; this revision refreshes the narrative and embedded source blocks. It is tracked in feature commit `7890ac1`.
 - `package-lock.json` was not reviewed; dependency reproducibility depends on it.
-- There is no LICENSE file, CONTRIBUTING guide, CI workflow, issue template, or deployment configuration beyond `Procfile`.
-- The declared Node engine is `>=18`, but tests were run on Node 24. Node 18 compatibility is likely but not verified in CI.
+- There is no LICENSE file, CONTRIBUTING guide, CI workflow, issue template, or deployment configuration beyond `Procfile`; Heroku commands are documented in README.
+- The declared Node engine is `22.x`, matching Heroku's supported runtime; tests were run locally on Node 24.
 
 ### Missing features / product gaps
 
@@ -2640,7 +2672,9 @@ Caveats:
 - [x] Update README to upload the generated notebook rather than the Python source.
 - [x] Add optional `ACCESS_PASSWORD` auth with login/logout and session cookies.
 - [x] Add status `source`, two-failure UI threshold, fixed status labels, stream validation, model omission, static 404, and `HOST` handling.
-- [x] Add mock-upstream/security/auth/status/frontend/notebook tests.
+- [x] Add mock-upstream/security/auth/status/frontend/notebook/Heroku tests.
+- [x] Add `SESSION_SECRET` support, production password warning, startup flag logging, and SSE keep-alive.
+- [x] Set Node engine to `22.x` and document single-Eco-dyno Heroku deployment, H12 limits, and token matching.
 - [ ] Set real `SITE_URL`, `KAGGLE_BRIDGE_TOKEN`, and (if needed) `HF_TOKEN` in Kaggle; upload `kaggle/notebook.ipynb` and run it.
 - [ ] Configure the website with matching `BRIDGE_TOKEN`, a strong `ACCESS_PASSWORD`, `ALLOWED_ORIGIN`, and `TRUST_PROXY=1` if behind a trusted proxy.
 - [ ] Deploy over HTTPS; verify heartbeat, status source, chat streaming, and logout end to end.

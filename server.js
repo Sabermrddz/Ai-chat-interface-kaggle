@@ -270,15 +270,28 @@ initBridgeFromEnv();
 
 const server = app.listen(PORT, HOST, () => {
   const displayHost = HOST === '0.0.0.0' ? 'localhost' : HOST;
-  console.log(`Server is running on http://${displayHost}:${PORT}`);
+  const bridgeTokenSet = Boolean(String(process.env.BRIDGE_TOKEN || '').trim());
+  const accessPasswordSet = Boolean(String(process.env.ACCESS_PASSWORD || '').trim());
+  const allowedOriginSet = ALLOWED_ORIGINS.length > 0;
 
-  if (!process.env.BRIDGE_TOKEN) {
+  console.log(`Server is running on http://${displayHost}:${PORT}`);
+  console.log(
+    `Startup config: BRIDGE_TOKEN=${bridgeTokenSet}, ALLOWED_ORIGIN=${allowedOriginSet}, ACCESS_PASSWORD=${accessPasswordSet}`
+  );
+
+  if (!bridgeTokenSet) {
     console.warn('BRIDGE_TOKEN is not set. Notebook heartbeats will be rejected.');
   }
 
-  if (ALLOWED_ORIGINS.length === 0) {
+  if (!allowedOriginSet) {
     console.warn(
       'ALLOWED_ORIGIN is not set. Only same-host browser origins are allowed. Set it in production.'
+    );
+  }
+
+  if (!accessPasswordSet && process.env.NODE_ENV === 'production') {
+    console.warn(
+      'ACCESS_PASSWORD is not set. The chat interface and APIs are publicly accessible in production.'
     );
   }
 });

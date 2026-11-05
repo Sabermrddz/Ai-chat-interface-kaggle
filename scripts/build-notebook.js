@@ -19,8 +19,8 @@ Before running:
 3. Add Secrets in **Add-ons > Secrets** and attach them to this notebook:
    - \`KAGGLE_BRIDGE_TOKEN\` (required): the same long random value as the website's \`BRIDGE_TOKEN\`.
    - \`HF_TOKEN\` (optional): only needed for gated Hugging Face repositories.
-4. In the configuration cell, set \`SITE_URL\` to your deployed website base URL,
-   for example \`https://my-chat.onrender.com\` (HTTPS, no trailing slash).
+4. In the configuration cell, set \`SITE_URL\` to your Heroku app URL,
+   for example \`https://my-chat.herokuapp.com\` (HTTPS, no trailing slash).
 5. Run all cells and leave the final cell running.
 
 The notebook downloads a GGUF model from Hugging Face, serves it through

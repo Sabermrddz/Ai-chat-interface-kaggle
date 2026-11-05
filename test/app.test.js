@@ -32,12 +32,17 @@ function startServer(port, extraEnv) {
       HOST: '127.0.0.1',
       BRIDGE_TOKEN: TEST_SECRET,
       ACCESS_PASSWORD: '',
+      SESSION_SECRET: '',
       ALLOWED_ORIGIN: '',
+      BRIDGE_EXTRA_HOSTS: '',
+      REQUEST_BODY_LIMIT: '',
+      TRUST_PROXY: '',
       MODEL_API_URL: '',
       MODEL_NAME: '',
       STATUS_PING_TIMEOUT_MS: '150',
       UPSTREAM_CONNECT_TIMEOUT_MS: '500',
       UPSTREAM_IDLE_TIMEOUT_MS: '500',
+      SSE_KEEPALIVE_MS: '',
       ...extraEnv
     },
     stdio: ['ignore', 'pipe', 'pipe']

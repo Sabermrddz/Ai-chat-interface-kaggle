@@ -35,7 +35,7 @@ function chatCompletionRequest() {
 
 before(async () => {
   mock = await startMockUpstream();
-  server = await startServer();
+  server = await startServer({ SSE_KEEPALIVE_MS: '100' });
 
   const registration = await configureManualBridge(server, {
     url: mock.url,
@@ -80,6 +80,29 @@ test('unknown model names are omitted from the upstream request', async () => {
   assert.equal(Object.hasOwn(upstreamRequest.body, 'model'), false);
 });
 
+test('a literal "default" model name is omitted from the upstream request', async () => {
+  mock.state.modelsBody = { object: 'list', data: [{ id: 'default' }] };
+
+  const registration = await configureManualBridge(server, {
+    url: mock.url,
+    model: 'default'
+  });
+  assert.equal(registration.status, 200);
+  assert.deepEqual(await registration.json(), { ok: true, model: null });
+
+  const response = await chatRequest({ stream: false });
+  assert.equal(response.status, 200);
+
+  const upstreamRequest = chatCompletionRequest();
+  assert.equal(Object.hasOwn(upstreamRequest.body, 'model'), false);
+
+  mock.state.modelsBody = null;
+  await configureManualBridge(server, {
+    url: mock.url,
+    model: 'mock-model'
+  });
+});
+
 test('the string "false" disables streaming', async () => {
   mock.state.model = 'mock-model';
   mock.state.modelsBody = null;
@@ -113,6 +136,30 @@ test('streaming chat forwards SSE data and the done marker', async () => {
   assert.match(text, /from mock/);
   assert.match(text, /\[DONE\]/);
   assert.equal(chatCompletionRequest().body.stream, true);
+});
+
+test('streaming sends SSE keep-alive comments while waiting for output', async () => {
+  mock.state.chatHandler = (req, res) => {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.flushHeaders?.();
+
+    setTimeout(() => {
+      res.write('data: {"choices":[{"delta":{"content":"Late"}}]}\n\n');
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }, 300);
+  };
+
+  const response = await chatRequest({ stream: true });
+  assert.equal(response.status, 200);
+
+  const text = await response.text();
+  assert.match(text, /: ping/);
+  assert.match(text, /Late/);
+  assert.match(text, /\[DONE\]/);
+
+  mock.state.chatHandler = null;
 });
 
 test('upstream status codes map to friendly errors', async () => {

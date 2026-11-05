@@ -68,7 +68,7 @@ Procfile                     Process command for Render/Railway/Heroku
 
 ## Requirements
 
-- Node.js 18 or newer
+- Node.js 22.x (declared in `package.json`; Heroku installs this automatically)
 - A Kaggle account with Internet and GPU enabled
 - A Cloudflare quick tunnel (the notebook downloads `cloudflared`)
 - A long random shared secret, for example from `openssl rand -hex 32`
@@ -124,9 +124,11 @@ connections; set `HOST=127.0.0.1` for a local-only server.
 | `HOST` | `0.0.0.0` | Bind address; use `127.0.0.1` for local-only access |
 | `ALLOWED_ORIGIN` | same host | Comma-separated browser origins allowed to call the API |
 | `ACCESS_PASSWORD` | none | Enables the password login for `/api/status` and `/api/chat` |
+| `SESSION_SECRET` | derived | Optional independent HMAC key for session cookies; falls back to `ACCESS_PASSWORD` + `BRIDGE_TOKEN` |
 | `NODE_ENV` | none | Set to `production` so session cookies are marked `Secure` |
 | `REQUEST_BODY_LIMIT` | `256kb` | Maximum JSON request body size |
 | `BRIDGE_EXTRA_HOSTS` | none | Extra heartbeat hostnames beyond `*.trycloudflare.com` |
+| `SSE_KEEPALIVE_MS` | `15000` | Interval for SSE `: ping` comments while waiting for model output |
 | `MODEL_API_URL` | none | Manual fallback model base URL (no `/v1` path) |
 | `MODEL_NAME` | auto | Fallback model name for manual/env mode |
 | `MODEL_API_KEY` | `BRIDGE_TOKEN` | Bearer token for the manual/env model server |
@@ -280,18 +282,43 @@ Create a project from the same repo, use the `master` branch, start with
 `npm start`, and set the same environment variables. Railway supports long-lived
 HTTP streaming, which this app uses for SSE.
 
-### Heroku
+### Deploy to Heroku
 
-Heroku no longer has a free tier. The included `Procfile` still works on a paid
-dyno:
+Heroku no longer has a free tier: the **Eco dyno is paid**. This app is designed
+to run on exactly one Eco web dyno. Do not scale to multiple dynos: bridge state,
+rate-limit counters, and login sessions are in memory and are not shared between
+processes. The app does not write to disk, so an ephemeral filesystem is fine;
+restarts simply clear in-memory state.
+
+Run these commands from the repository root (the branch is `master`):
 
 ```bash
 heroku create
 heroku config:set BRIDGE_TOKEN=your-long-random-secret
 heroku config:set ALLOWED_ORIGIN=https://your-app.herokuapp.com
 heroku config:set TRUST_PROXY=1
+heroku config:set ACCESS_PASSWORD=your-long-random-password
+heroku config:set NODE_ENV=production
+heroku ps:scale web=1
 git push heroku master
+heroku logs --tail
 ```
+
+Replace `your-app` in `ALLOWED_ORIGIN` with the app name printed by
+`heroku create`. `BRIDGE_TOKEN` must be exactly the same value as the Kaggle
+secret `KAGGLE_BRIDGE_TOKEN`, or heartbeats and upstream chat requests will be
+rejected. Setting `SESSION_SECRET` is optional; if omitted, the session key is
+derived from `ACCESS_PASSWORD` + `BRIDGE_TOKEN`.
+
+Heroku's router closes requests that do not send a first byte within 30 seconds
+(H12). Use a small, fast model (the default 3B GGUF), keep `max_tokens` modest,
+and wait for the model to warm up. The server sends an SSE `: ping` comment every
+15 seconds while a stream is waiting for its first token, which keeps the
+connection active once streaming starts.
+
+The Kaggle heartbeat runs every 30 seconds and also keeps the Eco dyno awake;
+without traffic, Eco dynos sleep. In-memory state is lost after a sleep or
+restart, but the next heartbeat restores the tunnel URL automatically.
 
 Do not use `git push heroku main`; this repository's branch is `master`.
 
@@ -340,6 +367,8 @@ the upstream request omits the `model` field instead of sending `"default"`.
   Rotate both if the value is ever exposed.
 - Set a long random `ACCESS_PASSWORD` for a public deployment. Login is rate
   limited, and the HMAC-signed session cookie cannot be read by JavaScript.
+  Optionally set `SESSION_SECRET` so rotating `ACCESS_PASSWORD` or `BRIDGE_TOKEN`
+  does not invalidate existing sessions; without it, the key is derived from both.
 - The quick tunnel URL is public, but the model server requires the bearer token.
   The browser never receives the token.
 - The Express server logs only method, path, status, and duration. It does not log
@@ -347,7 +376,7 @@ the upstream request omits the `model` field instead of sending `"default"`.
 - CORS is restricted to `ALLOWED_ORIGIN` in production. Set it to the exact
   origin, without a trailing slash.
 - Rate limits, a 256 KB JSON body limit, input validation, CSP, and basic security
-  headers are enabled by default.
+  headers are enabled by default. The server writes no application data to disk.
 - Keep `HOST=127.0.0.1` when you do not want the server reachable outside the
   local machine.
 - Bridge state is in memory only. There is no database and no persistence of
