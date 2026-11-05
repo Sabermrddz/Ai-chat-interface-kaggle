@@ -33,6 +33,45 @@ function chatCompletionRequest() {
     .at(-1);
 }
 
+const DEFAULT_SSE_EVENTS = [
+  { choices: [{ delta: { content: 'Hello' } }] },
+  { choices: [{ delta: { content: ' from mock' } }] }
+];
+
+function setNonStreamReply(content) {
+  mock.state.chatHandler = null;
+  mock.state.chatStatus = 200;
+  mock.state.chatBody = {
+    id: 'mock-completion',
+    model: 'mock-model',
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content },
+        finish_reason: 'stop'
+      }
+    ]
+  };
+}
+
+function setStreamReply(contents, delayMs = 0) {
+  mock.state.chatHandler = null;
+  mock.state.chatStatus = 200;
+  mock.state.chatBody = null;
+  mock.state.sseDelayMs = delayMs;
+  mock.state.sseEvents = contents.map((content) => ({
+    choices: [{ delta: { content } }]
+  }));
+}
+
+function resetChatMock() {
+  mock.state.chatHandler = null;
+  mock.state.chatStatus = 200;
+  mock.state.chatBody = null;
+  mock.state.sseDelayMs = 0;
+  mock.state.sseEvents = DEFAULT_SSE_EVENTS;
+}
+
 before(async () => {
   mock = await startMockUpstream();
   server = await startServer({ SSE_KEEPALIVE_MS: '100' });
@@ -61,6 +100,45 @@ test('non-streaming chat returns the upstream reply', async () => {
   const upstreamRequest = chatCompletionRequest();
   assert.equal(upstreamRequest.body.stream, false);
   assert.equal(upstreamRequest.body.model, 'mock-model');
+  assert.equal(upstreamRequest.body.max_tokens, 2048);
+});
+
+test('non-streaming replies strip reasoning after a missing opening tag', async (t) => {
+  t.after(resetChatMock);
+  setNonStreamReply('private chain</think>Final answer');
+
+  const response = await chatRequest({ stream: false });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).reply, 'Final answer');
+});
+
+test('non-streaming replies strip complete think blocks', async (t) => {
+  t.after(resetChatMock);
+  setNonStreamReply('<think>private chain</think>Final answer');
+
+  const response = await chatRequest({ stream: false });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).reply, 'Final answer');
+});
+
+test('non-streaming replies keep content without think tags', async (t) => {
+  t.after(resetChatMock);
+  setNonStreamReply('Plain answer');
+
+  const response = await chatRequest({ stream: false });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).reply, 'Plain answer');
+});
+
+test('non-streaming reasoning-only replies return the budget error', async (t) => {
+  t.after(resetChatMock);
+  setNonStreamReply('private chain</think>');
+
+  const response = await chatRequest({ stream: false });
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), {
+    error: 'The model used its whole token budget on reasoning; raise max_tokens.'
+  });
 });
 
 test('unknown model names are omitted from the upstream request', async () => {
@@ -136,6 +214,61 @@ test('streaming chat forwards SSE data and the done marker', async () => {
   assert.match(text, /from mock/);
   assert.match(text, /\[DONE\]/);
   assert.equal(chatCompletionRequest().body.stream, true);
+});
+
+test('streaming strips reasoning when </think> is split across chunks', async (t) => {
+  t.after(resetChatMock);
+  setStreamReply(['private chain</thi', 'nk>Final answer']);
+
+  const response = await chatRequest({ stream: true });
+  assert.equal(response.status, 200);
+
+  const text = await response.text();
+  assert.doesNotMatch(text, /private chain/);
+  assert.match(text, /Final answer/);
+  assert.match(text, /\[DONE\]/);
+});
+
+test('streaming strips complete think blocks', async (t) => {
+  t.after(resetChatMock);
+  setStreamReply(['<think>private chain</think>Final ', 'answer']);
+
+  const response = await chatRequest({ stream: true });
+  assert.equal(response.status, 200);
+
+  const text = await response.text();
+  assert.doesNotMatch(text, /private chain/);
+  assert.match(text, /Final/);
+  assert.match(text, /answer/);
+  assert.match(text, /\[DONE\]/);
+});
+
+test('streaming flushes buffered text when no think tags arrive', async (t) => {
+  t.after(resetChatMock);
+  setStreamReply(['Plain ', 'answer']);
+
+  const response = await chatRequest({ stream: true });
+  assert.equal(response.status, 200);
+
+  const text = await response.text();
+  assert.match(text, /Plain/);
+  assert.match(text, /answer/);
+  assert.match(text, /\[DONE\]/);
+});
+
+test('streaming reasoning-only replies return the budget error', async (t) => {
+  t.after(resetChatMock);
+  setStreamReply(['private chain</think>']);
+
+  const response = await chatRequest({ stream: true });
+  assert.equal(response.status, 200);
+
+  const text = await response.text();
+  assert.match(
+    text,
+    /The model used its whole token budget on reasoning; raise max_tokens\./
+  );
+  assert.match(text, /\[DONE\]/);
 });
 
 test('streaming sends SSE keep-alive comments while waiting for output', async () => {

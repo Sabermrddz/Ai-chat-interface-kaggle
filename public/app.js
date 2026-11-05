@@ -16,7 +16,7 @@ const STATUS_POLL_MS = 10_000;
 const DEFAULT_SETTINGS = Object.freeze({
   systemPrompt: 'You are a helpful assistant.',
   temperature: 0.7,
-  maxTokens: 1024
+  maxTokens: 2048
 });
 
 const chatForm = document.getElementById('chat-form');

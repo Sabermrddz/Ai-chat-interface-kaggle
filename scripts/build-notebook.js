@@ -7,27 +7,6 @@ const ROOT = path.join(__dirname, '..');
 const SOURCE_PATH = path.join(ROOT, 'kaggle', 'notebook.py');
 const OUTPUT_PATH = path.join(ROOT, 'kaggle', 'notebook.ipynb');
 
-const INTRO = `# Kaggle LLM Bridge
-
-This notebook is generated from \`kaggle/notebook.py\`. Edit that file and run
-\`npm run build:notebook\` to regenerate this notebook.
-
-Before running:
-
-1. In the Kaggle notebook settings, enable **Internet**.
-2. Enable a **GPU** accelerator. A T4 x2 or P100 is enough for the default 3B model.
-3. Add Secrets in **Add-ons > Secrets** and attach them to this notebook:
-   - \`KAGGLE_BRIDGE_TOKEN\` (required): the same long random value as the website's \`BRIDGE_TOKEN\`.
-   - \`HF_TOKEN\` (optional): only needed for gated Hugging Face repositories.
-4. In the configuration cell, set \`SITE_URL\` to your Heroku app URL,
-   for example \`https://my-chat.herokuapp.com\` (HTTPS, no trailing slash).
-5. Run all cells and leave the final cell running.
-
-The notebook downloads a GGUF model from Hugging Face, serves it through
-\`llama-cpp-python\` with an OpenAI-compatible API, exposes it with a Cloudflare
-quick tunnel, and sends heartbeats to the website.
-`;
-
 function trimBlankLines(lines) {
   let start = 0;
   let end = lines.length;
@@ -93,13 +72,7 @@ function withTrailingNewline(text) {
 
 function buildNotebook(source) {
   const blocks = parseBlocks(source);
-  const cells = [
-    {
-      cell_type: 'markdown',
-      metadata: {},
-      source: withTrailingNewline(INTRO)
-    }
-  ];
+  const cells = [];
 
   for (const block of blocks) {
     if (block.type === 'markdown') {

@@ -38,20 +38,13 @@ test('parseBlocks splits code and markdown cells', () => {
   ]);
 });
 
-test('buildNotebook creates valid nbformat cells with an intro', () => {
+test('buildNotebook creates valid nbformat cells', () => {
   const notebook = buildNotebook('# %%\nprint("hi")\n');
-  const codeCell = notebook.cells.at(-1);
+  const codeCell = notebook.cells[0];
 
   assert.equal(notebook.nbformat, 4);
   assert.equal(notebook.nbformat_minor, 5);
-  const intro = cellSource(notebook.cells[0]);
-  assert.equal(notebook.cells[0].cell_type, 'markdown');
-  assert.match(intro, /Internet/);
-  assert.match(intro, /GPU/);
-  assert.match(intro, /KAGGLE_BRIDGE_TOKEN/);
-  assert.match(intro, /HF_TOKEN/);
-  assert.match(intro, /SITE_URL/);
-
+  assert.equal(notebook.cells.length, 1);
   assert.equal(codeCell.cell_type, 'code');
   assert.equal(codeCell.execution_count, null);
   assert.deepEqual(codeCell.outputs, []);
@@ -64,6 +57,9 @@ test('notebook.ipynb is generated from notebook.py and is current', () => {
   const actual = JSON.parse(fs.readFileSync(OUTPUT_PATH, 'utf8'));
 
   assert.deepEqual(actual, expected);
+  assert.equal(actual.cells.length, 5);
+  assert.equal(actual.cells.filter((cell) => cell.cell_type === 'markdown').length, 1);
+  assert.equal(actual.cells.filter((cell) => cell.cell_type === 'code').length, 4);
 
   const markerCount = source
     .split(/\r?\n/)

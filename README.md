@@ -311,10 +311,10 @@ rejected. Setting `SESSION_SECRET` is optional; if omitted, the session key is
 derived from `ACCESS_PASSWORD` + `BRIDGE_TOKEN`.
 
 Heroku's router closes requests that do not send a first byte within 30 seconds
-(H12). Use a small, fast model (the default 3B GGUF), keep `max_tokens` modest,
-and wait for the model to warm up. The server sends an SSE `: ping` comment every
-15 seconds while a stream is waiting for its first token, which keeps the
-connection active once streaming starts.
+(H12). Use a small, fast model (the default 3B GGUF), keep `max_tokens` at 2048
+or higher for thinking models, and wait for the model to warm up. The server
+sends an SSE `: ping` comment every 15 seconds while a stream is buffering
+reasoning or waiting for its first token, which keeps the connection active.
 
 The Kaggle heartbeat runs every 30 seconds and also keeps the Eco dyno awake;
 without traffic, Eco dynos sleep. In-memory state is lost after a sleep or
@@ -349,7 +349,7 @@ seven days, and marked `Secure` in production or over HTTPS.
     { "role": "user", "content": "Hello" }
   ],
   "temperature": 0.7,
-  "max_tokens": 1024,
+  "max_tokens": 2048,
   "stream": true
 }
 ```
@@ -359,6 +359,12 @@ message count, per-message length, total conversation length, and output tokens.
 Set `stream` to a boolean; the string `"false"` is also accepted for compatibility,
 and other non-boolean values return HTTP 400. If no model name can be resolved,
 the upstream request omits the `model` field instead of sending `"default"`.
+
+The server strips Qwen-style reasoning tags from replies. Non-streaming replies
+keep only the text after the last `</think>`, and streaming replies buffer until
+`</think>` appears before forwarding the final answer. Streams without closing
+tags are flushed when they end. If stripping leaves no answer, the API returns
+`The model used its whole token budget on reasoning; raise max_tokens.`
 
 ## Security notes
 

@@ -1,6 +1,6 @@
 # PROJECT OVERVIEW
 
-**Scope of this review:** every project file was read or regenerated except `node_modules/` and `package-lock.json`, as requested. The repository is branch `master`: base commit `78f51d7` (`update`), feature commit `7890ac1` (`Add auth, status sources, and notebook generation`), pushed to `origin`. This revision was updated on 2026-11-05 after implementing authentication, status-source labels, stream/model fixes, notebook generation, Heroku readiness (Node 22, startup flags, SSE keep-alive, single-dyno deployment docs), and the expanded 56-test suite. No real secrets, tokens, or API keys are present; `.env.example` placeholders and test-only secrets are not production credentials.
+**Scope of this review:** every project file was read or regenerated except `node_modules/`. The repository is branch `master`: base commit `78f51d7` (`update`), feature commit `7890ac1` (`Add auth, status sources, and notebook generation`), pushed to `origin`. This revision was updated on 2026-11-05 after implementing authentication, status-source labels, stream/model fixes, notebook generation, Heroku readiness (Node 22, startup flags, SSE keep-alive, single-dyno deployment docs), reasoning stripping, and the expanded 64-test suite. The files changed in this pass are listed under “Implementation changes in this pass” in section 10. No real secrets, tokens, or API keys are present; `.env.example` placeholders and test-only secrets are not production credentials.
 
 ---
 
@@ -75,7 +75,7 @@ kaggle-interface/
 ├── server.js                     Express app: middleware, routes, auth, startup/shutdown, static files
 ├── kaggle/
 │   ├── notebook.py               Source notebook cells: install, download GGUF, serve, tunnel, heartbeat
-│   └── notebook.ipynb            Generated upload-ready notebook (18 cells: 10 markdown, 8 code)
+│   └── notebook.ipynb            Generated upload-ready notebook (5 cells: 1 markdown, 4 code)
 ├── lib/
 │   ├── auth.js                   Optional ACCESS_PASSWORD login, HMAC session cookies, auth middleware
 │   ├── bridge.js                 Bridge state, token checks, URL validation, status ping, admin auth
@@ -209,18 +209,20 @@ kaggle-interface/
   - Legacy form: `message`: a string (trimmed, non-empty, max 16,000 characters), converted to one user message.
   - `systemPrompt`: optional string, max 8,000 characters; prepended as a system message if no system message already exists. The frontend does not use this field; it sends the system prompt inside `messages`.
   - `temperature`: optional number, default `0.7`; values outside 0–2 are clamped, non-numbers are rejected.
-  - `max_tokens` or `maxTokens`: optional number, default `1024`; clamped to 1–4096.
+  - `max_tokens` or `maxTokens`: optional number, default `2048`; clamped to 1–4096.
   - `stream`: defaults to `true`; booleans are accepted. The string `"false"` is accepted for backward compatibility and disables streaming. Any other non-boolean value returns `400 {"error":"stream must be a boolean."}`.
 - Model handling: `resolveModelName()` uses the stored alias, then a live `/v1/models` ping, then `MODEL_NAME`, otherwise `null`. The literal alias `default` is treated as unknown. If the resolved model is null, the upstream body omits `model` entirely rather than sending `"default"`.
 - Body limit: `256kb` by default (`REQUEST_BODY_LIMIT` can change it).
 - Success with `stream:true` (default): `200` with `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-cache, no-transform`, `Connection: keep-alive`, `X-Accel-Buffering: no`.
-  - Upstream SSE chunks are forwarded as-is.
-  - While the stream is open, an SSE comment (`: ping`) is written every `SSE_KEEPALIVE_MS` (default 15,000 ms) to keep Heroku/proxies from closing an idle connection while the model produces its first token.
+  - Response content is filtered for Qwen reasoning: deltas are buffered until `</think>` appears, text before it is dropped, and the remaining answer is forwarded as SSE content events. If the stream ends without `</think>`, the buffered text is flushed as the answer.
+  - While the stream is open, an SSE comment (`: ping`) is written every `SSE_KEEPALIVE_MS` (default 15,000 ms) to keep Heroku/proxies from closing an idle connection while reasoning is buffered or the model produces its first token.
+  - If filtering leaves no answer, the stream sends `The model used its whole token budget on reasoning; raise max_tokens.` followed by `data: [DONE]`.
   - If the upstream returns a non-SSE JSON response, the server converts it into one SSE event:
     - `data: {"choices":[{"delta":{"content":"<reply>"}}]}`
     - `data: [DONE]`
   - Errors during a stream are sent as `data: {"error":{"message":"..."}}` followed by `data: [DONE]`.
-- Success with `stream:false`: `200 {"reply": string, "model"?: string}` where reply is `choices[0].message.content` or `choices[0].text`. `model` is omitted when neither the upstream nor the bridge supplies one.
+- Success with `stream:false`: `200 {"reply": string, "model"?: string}` where reply is the cleaned `choices[0].message.content` or `choices[0].text`. Complete `<think>...</think>` blocks are removed, and when `</think>` is present only the text after the last closing tag is kept. `model` is omitted when neither the upstream nor the bridge supplies one.
+- Reasoning-only replies return `502 {"error":"The model used its whole token budget on reasoning; raise max_tokens."}` when stripping leaves no answer.
 - Validation errors: `400` JSON `{"error": "..."}` with messages including:
   - `Please type a message before sending.`
   - `A conversation can contain at most 40 messages.`
@@ -802,7 +804,7 @@ const STATUS_POLL_MS = 10_000;
 const DEFAULT_SETTINGS = Object.freeze({
   systemPrompt: 'You are a helpful assistant.',
   temperature: 0.7,
-  maxTokens: 1024
+  maxTokens: 2048
 });
 
 const chatForm = document.getElementById('chat-form');
@@ -2480,7 +2482,7 @@ There are no other environment variables read by `server.js` or `lib/*.js`; a se
   - Treats all other blocks as Python code cells, trims blank lines, and skips empty blocks.
   - Emits nbformat 4.5 JSON with `metadata.language_info` for Python and empty outputs/execution counts.
   - Writes `kaggle/notebook.ipynb`; the generated file is intended to be uploaded to Kaggle.
-- The generated notebook currently has **18 cells: 10 markdown and 8 code**. Its first markdown cell explains enabling Internet/GPU, adding `KAGGLE_BRIDGE_TOKEN` and optional `HF_TOKEN`, and setting `SITE_URL` to the Heroku app URL. `test/notebook.test.js` verifies this structure and checks that the committed notebook matches a fresh generation.
+- The generated notebook currently has **5 cells: 1 markdown and 4 code**. The compact source keeps its own intro card and configuration in the first code cell; `build-notebook.js` no longer prepends a separate generated intro. A CUDA runtime check cell sits between setup and model launch. `test/notebook.test.js` verifies the 5/1/4 structure and checks that the committed notebook matches a fresh generation.
 - The notebook does not contain secrets or outputs. Kaggle Secrets are read at runtime by the notebook, not embedded in the `.ipynb`.
 
 ---
@@ -2495,7 +2497,7 @@ npm test
 
 The exact script is `node --test test/*.test.js`. On this Windows/Node setup, `node --test test` fails with `Cannot find module ...\test`; use the npm script or the glob form shown above.
 
-**Latest run in this review:** `npm test` produced **56 tests, 56 passed, 0 failed** in about 6.2 seconds. `node --check` also passed for `server.js`, `lib/auth.js`, `lib/bridge.js`, `lib/chat-proxy.js`, `public/app.js`, `public/ui-helpers.js`, `scripts/build-notebook.js`, the test helpers, and `test/config.test.js`.
+**Latest run in this review:** `npm test` produced **64 tests, 64 passed, 0 failed** in about 6.4 seconds. `node --check` also passed for `server.js`, `lib/auth.js`, `lib/bridge.js`, `lib/chat-proxy.js`, `public/app.js`, `public/ui-helpers.js`, `scripts/build-notebook.js`, the test helpers, `test/proxy.test.js`, `test/notebook.test.js`, and `test/heroku.test.js`.
 
 Test files and coverage:
 
@@ -2506,8 +2508,8 @@ Test files and coverage:
 | `test/config.test.js` | 4 | `HOST` binding/default, `.env.example` documentation, README notebook/local-binding documentation, detach-finalize wiring. |
 | `test/frontend.test.js` | 7 | Heartbeat vs manual/env labels, unknown source, checking/offline distinction, two-failure threshold, persisted stop note, auth prompt logic. |
 | `test/heroku.test.js` | 8 | Node 22 engine/Procfile, Heroku README/H12 docs, new env docs, startup boolean log, production warning, `SESSION_SECRET` isolation, fallback key derivation, `TRUST_PROXY` IP/Secure cookie behavior. |
-| `test/notebook.test.js` | 3 | Cell parsing, generated nbformat structure/intro, committed notebook freshness. |
-| `test/proxy.test.js` | 10 | Mock upstream non-stream success, model omission (including literal `default`), `"false"` streaming, invalid stream rejection, SSE forwarding with `[DONE]`, SSE keep-alive, status-code mapping, idle timeout, client abort. |
+| `test/notebook.test.js` | 3 | Cell parsing, generated nbformat structure (5 cells: 1 markdown, 4 code), committed notebook freshness. |
+| `test/proxy.test.js` | 18 | Mock upstream non-stream success, model omission (including literal `default`), `"false"` streaming, invalid stream rejection, reasoning stripping (missing opening tag, complete blocks, split tags, no tags, reasoning-only), SSE forwarding with `[DONE]`, SSE keep-alive, status-code mapping, idle timeout, client abort. |
 | `test/security.test.js` | 5 | Static extension 404 vs SPA fallback, CORS allow/deny, oversized body, malformed JSON, registration disabled without `BRIDGE_TOKEN`. |
 | `test/status.test.js` | 2 | `MODEL_API_URL` env source and manual source through `/api/status`. |
 
@@ -2515,7 +2517,7 @@ Notes about the tests:
 
 - Tests spawn the Express app on free ports through `test/helpers/app-server.js`; they do not use the real tunnel, Kaggle, Hugging Face, or a real model.
 - `test/helpers/mock-upstream.js` implements an OpenAI-compatible `/v1/models` and `/v1/chat/completions` server, with configurable JSON, SSE (including `data: [DONE]`), errors, and delays.
-- Tests set `NODE_ENV=test`, `HOST=127.0.0.1`, short timeouts, and clear `ACCESS_PASSWORD`/`MODEL_*` by default. Some auth/status tests deliberately spawn additional servers with different env values and close them afterward.
+- Tests set `NODE_ENV=test`, `HOST=127.0.0.1`, short timeouts, and clear `ACCESS_PASSWORD`, `SESSION_SECRET`, `SSE_KEEPALIVE_MS`/`MODEL_*` by default. Some auth/status/Heroku tests deliberately spawn additional servers with different env values and close them afterward.
 - `test/app.test.js` still contains its own local `startServer` helper rather than importing the shared helper; the other tests use the shared helper. This duplication is harmless but could be consolidated later.
 - There is no browser automation (Playwright/Puppeteer), visual regression test, load test, fuzzing, or real-network integration test.
 
@@ -2527,7 +2529,7 @@ What happens in a fresh local environment:
 
 ```powershell
 npm install        # installs express only (package-lock already present)
-npm test           # 56 tests pass; no external services required
+npm test           # 64 tests pass; no external services required
 npm start          # starts http://localhost:3000 by default on HOST=0.0.0.0
 npm run build:notebook  # regenerates kaggle/notebook.ipynb from notebook.py
 ```
@@ -2630,6 +2632,24 @@ Caveats:
 - Startup logs flag presence (never values) for `BRIDGE_TOKEN`, `ALLOWED_ORIGIN`, and `ACCESS_PASSWORD`; production warns when no password is set.
 - `HOST`, `ACCESS_PASSWORD`, `SESSION_SECRET`, `REQUEST_BODY_LIMIT`, `BRIDGE_EXTRA_HOSTS`, and `SSE_KEEPALIVE_MS` are documented in `.env.example` and README.
 - README now points to `notebook.ipynb` for upload, documents local-only `HOST`, and includes a single-Eco-dyno Heroku deployment section.
+
+### Implementation changes in this pass
+
+- `server.js`: added the `Startup config: BRIDGE_TOKEN=<bool>, ALLOWED_ORIGIN=<bool>, ACCESS_PASSWORD=<bool>` log line; added the `NODE_ENV=production` warning when `ACCESS_PASSWORD` is unset. No secret values are logged.
+- `lib/auth.js`: added `SESSION_SECRET` as the session HMAC key source; when unset, the key is derived from `ACCESS_PASSWORD` + `BRIDGE_TOKEN`. Exported `configuredSessionSecret()` for introspection.
+- `lib/chat-proxy.js`: added configurable SSE keep-alive comments (`: ping` every `SSE_KEEPALIVE_MS`, default 15,000 ms) and an explicit guard that drops literal `"default"` model names before building the upstream body.
+- `package.json` / `package-lock.json`: changed the declared runtime from `>=18` to `22.x`; `start` remains `node server.js`.
+- `kaggle/notebook.py` / `kaggle/notebook.ipynb`: replaced the long notebook with the compact version, now 5 cells (1 markdown intro + 4 code cells for setup, CUDA runtime check, model launch, and tunnel/heartbeat).
+- `scripts/build-notebook.js`: removed the hardcoded generated intro so the notebook reflects only the source blocks in `notebook.py`; regenerating now yields 4 cells instead of the previous 18.
+- `test/notebook.test.js`: removed assertions tied to the old generated intro and 18-cell layout; now asserts 5 total cells (1 markdown, 4 code) and keeps the freshness check.
+- `.env.example` / `README.md`: documented `SESSION_SECRET` and `SSE_KEEPALIVE_MS`; expanded the Heroku section with exact `heroku` commands, single-Eco-dyno guidance, in-memory state, H12/30-second first-byte timeout, model warm-up advice, heartbeat keep-awake behavior, `ACCESS_PASSWORD`/`NODE_ENV`, and `BRIDGE_TOKEN` == `KAGGLE_BRIDGE_TOKEN`.
+- `test/heroku.test.js` (new): 8 tests for Node 22/Procfile, Heroku docs, env docs, startup flags, production warning, `SESSION_SECRET` isolation, fallback key derivation, and `TRUST_PROXY`.
+- `test/proxy.test.js`: added tests for literal `"default"` omission and SSE keep-alive; test helper now configures a short keep-alive interval.
+- `lib/chat-proxy.js`: strip Qwen reasoning in both modes. Non-streaming replies keep only text after the last `</think>` and remove complete `<think>...</think>` blocks; streaming buffers deltas until `</think>`, then forwards the answer, flushing the buffer if no tag arrives. Reasoning-only replies return the token-budget error. The default `max_tokens` is now 2048.
+- `public/app.js` / `public/index.html`: default max tokens raised to 2048 and the settings hint notes that thinking models need at least 2048.
+- `test/proxy.test.js`: added reasoning-stripping coverage for missing opening tags, complete blocks, no tags, split stream tags, and reasoning-only replies; also asserts the 2048 default.
+- `test/app.test.js` / `test/helpers/app-server.js`: isolate `SESSION_SECRET`, `SSE_KEEPALIVE_MS`, `REQUEST_BODY_LIMIT`, `BRIDGE_EXTRA_HOSTS`, and `TRUST_PROXY` in spawned test servers.
+- Verified with `npm test`: **64 passed, 0 failed**.
 
 ### Security
 
